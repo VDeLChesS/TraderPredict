@@ -1,0 +1,155 @@
+# ============================================================
+# TraderPredict -- .gitignore
+# ============================================================
+
+# ------------------------------------------------------------
+# Python
+# ------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Distribution / packaging
+build/
+dist/
+downloads/
+eggs/
+.eggs/
+*.egg-info/
+*.egg
+wheels/
+share/python-wheels/
+MANIFEST
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+.env/
+env.bak/
+venv.bak/
+
+# ------------------------------------------------------------
+# Testing / type checking / linting caches
+# ------------------------------------------------------------
+.pytest_cache/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+nosetests.xml
+
+# ------------------------------------------------------------
+# Jupyter / IPython
+# ------------------------------------------------------------
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/*
+profile_default/
+ipython_config.py
+
+# ------------------------------------------------------------
+# Project-specific: data, models, results
+# ------------------------------------------------------------
+# Cached market data (re-downloadable from yfinance)
+data/raw/
+data/processed/
+data/features/
+*.parquet
+*.feather
+*.h5
+*.hdf5
+
+# Trained models (large binary pickles, can be regenerated via scripts/train_models.py)
+models/saved/
+models/training_summary.csv
+*.pkl
+*.pickle
+*.joblib
+*.model
+
+# Backtest results / generated outputs
+results/
+*.png
+*.jpg
+*.jpeg
+*.svg
+*.pdf
+
+# Allow committing static documentation images if needed
+!docs/**/*.png
+!docs/**/*.jpg
+
+# Logs
+logs/
+*.log
+
+# Temporary / scratch files
+tmp/
+tmp_*.txt
+tmp_*.py
+scratch_*.py
+*.tmp
+*.bak
+*.swp
+
+# ------------------------------------------------------------
+# Secrets / config (NEVER commit credentials)
+# ------------------------------------------------------------
+.env
+.env.local
+.env.*.local
+secrets.json
+credentials.json
+api_keys.json
+*.key
+*.pem
+
+# ------------------------------------------------------------
+# IDE / editor
+# ------------------------------------------------------------
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+.spyderproject
+.spyproject
+.ropeproject
+*.iml
+
+# ------------------------------------------------------------
+# OS
+# ------------------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# ------------------------------------------------------------
+# Claude Code / AI assistant
+# ------------------------------------------------------------
+.claude/
+CLAUDE.local.md
+
+# ------------------------------------------------------------
+# Optional: Phase planning docs (uncomment to ignore)
+# ------------------------------------------------------------
+# Phase1_System_Blueprint.md
+# Phase2_Implementation_Tasks.md
