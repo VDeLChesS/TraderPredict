@@ -6,8 +6,10 @@ Produces:
   2. CSV export: results/full_comparison.csv
   3. Equity curve plots: results/{symbol}_multi_equity.png
   4. Best strategy selection per symbol
-  5. Walk-forward summary: in-sample vs OOS degradation (Item 4)
+  5. Walk-forward summary: in-sample vs OOS degradation
   6. Walk-forward CSV: results/walkforward_comparison.csv
+  7. Portfolio aggregation: combine symbols into a single curve (Tier 2 Item 5)
+  8. Portfolio CSV + chart: results/portfolio_comparison.csv, portfolio_equity.png
 """
 
 import os
@@ -18,6 +20,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 from backtesting.engine import BacktestEngine
+from pipeline.portfolio_allocator import PortfolioAllocator
 
 
 class ReportGenerator:
@@ -357,6 +360,158 @@ class ReportGenerator:
             print(f"  Risk comparison plot: {path}")
 
         return paths
+
+    # ------------------------------------------------------------------
+    # Portfolio aggregation (Tier 2 Item 5)
+    # ------------------------------------------------------------------
+
+    def build_portfolios(
+        self,
+        strategy_names: list = None,
+        risk_config: str = "no_risk",
+        methods: list = None,
+    ) -> dict:
+        """
+        Build cross-symbol portfolios for selected strategies and allocation
+        methods. Returns nested dict: {strategy: {method: portfolio_result}}
+        """
+        if strategy_names is None:
+            strategy_names = ["MA Crossover", "EMA 12/26"]
+        if methods is None:
+            methods = ["equal_weight", "vol_weighted", "risk_parity"]
+
+        portfolios = {}
+        for strat_name in strategy_names:
+            portfolios[strat_name] = {}
+            for method in methods:
+                allocator = PortfolioAllocator(
+                    results=self.results,
+                    strategy_name=strat_name,
+                    risk_config=risk_config,
+                    method=method,
+                )
+                portfolios[strat_name][method] = allocator.build()
+        return portfolios
+
+    def print_portfolio_summary(self, portfolios: dict) -> None:
+        """Console table of portfolio metrics by strategy and allocation method."""
+        sep = "=" * 100
+        print(f"\n{sep}")
+        print(f"  PORTFOLIO AGGREGATION -- Cross-symbol equity (no-risk config)")
+        print(f"{sep}")
+
+        for strat_name, method_results in portfolios.items():
+            print(f"\n  Strategy: {strat_name}")
+            print(f"  {'-'*94}")
+            print(f"  {'Method':<18} {'Return':>10} {'Sharpe':>9} {'Sortino':>9} "
+                  f"{'MaxDD':>9} {'WinRate':>9} {'Trades':>9}")
+            print(f"  {'-'*94}")
+
+            for method, result in method_results.items():
+                m = result.get("metrics", {})
+                if not m:
+                    print(f"  {method:<18}  [no data]")
+                    continue
+                print(
+                    f"  {method:<18} "
+                    f"{m.get('total_return', 0):>9.2%} "
+                    f"{m.get('sharpe', 0):>9.3f} "
+                    f"{m.get('sortino', 0):>9.3f} "
+                    f"{m.get('max_drawdown', 0):>8.2%} "
+                    f"{m.get('win_rate', 0):>9.3f} "
+                    f"{int(m.get('num_trades', 0)):>9}"
+                )
+
+        print(f"{sep}")
+
+    def save_portfolio_csv(self, portfolios: dict) -> str:
+        """Save portfolio metrics + per-symbol contributions to CSV."""
+        rows = []
+        for strat_name, method_results in portfolios.items():
+            for method, result in method_results.items():
+                m = result.get("metrics", {})
+                if not m:
+                    continue
+                base_row = {
+                    "strategy":     strat_name,
+                    "method":       method,
+                    "risk_config":  result.get("risk_config", ""),
+                    "total_return": m.get("total_return", 0),
+                    "cagr":         m.get("cagr", 0),
+                    "sharpe":       m.get("sharpe", 0),
+                    "sortino":      m.get("sortino", 0),
+                    "max_drawdown": m.get("max_drawdown", 0),
+                    "win_rate":     m.get("win_rate", 0),
+                    "profit_factor": m.get("profit_factor", 0),
+                    "num_trades":   m.get("num_trades", 0),
+                }
+                # Add per-symbol contribution columns
+                for sym, stats in result.get("per_symbol", {}).items():
+                    base_row[f"weight_{sym}"]       = round(stats["avg_weight"], 4)
+                    base_row[f"contribution_{sym}"] = round(stats["contribution"], 4)
+                rows.append(base_row)
+
+        if not rows:
+            return ""
+
+        df = pd.DataFrame(rows)
+        path = os.path.join(self.results_dir, "portfolio_comparison.csv")
+        df.to_csv(path, index=False)
+        print(f"\n  Portfolio CSV saved: {path} ({len(df)} rows)")
+        return path
+
+    def plot_portfolio_equity(self, portfolios: dict) -> list:
+        """One chart per strategy showing equity curves under each allocation method."""
+        paths = []
+        colors = {
+            "equal_weight": "#2196F3",
+            "vol_weighted": "#FF9800",
+            "risk_parity":  "#4CAF50",
+        }
+
+        for strat_name, method_results in portfolios.items():
+            fig, ax = plt.subplots(figsize=(14, 6))
+
+            any_plotted = False
+            for method, result in method_results.items():
+                eq = result.get("equity_curve")
+                if eq is None or eq.empty:
+                    continue
+                normalised = eq / eq.iloc[0]
+                m = result["metrics"]
+                label = (
+                    f"{method} (Sharpe={m.get('sharpe', 0):.3f}, "
+                    f"MaxDD={m.get('max_drawdown', 0):.1%})"
+                )
+                ax.plot(eq.index, normalised, label=label, linewidth=1.5,
+                        color=colors.get(method, "black"))
+                any_plotted = True
+
+            if not any_plotted:
+                plt.close(fig)
+                continue
+
+            safe_strat = strat_name.replace("/", "_").replace(" ", "_")
+            ax.set_title(
+                f"Portfolio Equity -- {strat_name} (cross-symbol, normalised)"
+            )
+            ax.set_ylabel("Portfolio value (normalised to 1.0)")
+            ax.set_xlabel("Date")
+            ax.legend(loc="upper left", fontsize=9)
+            ax.grid(alpha=0.3)
+            plt.tight_layout()
+
+            path = os.path.join(self.results_dir, f"portfolio_{safe_strat}.png")
+            fig.savefig(path, dpi=100)
+            plt.close(fig)
+            paths.append(path)
+            print(f"  Portfolio plot: {path}")
+
+        return paths
+
+    # ------------------------------------------------------------------
+    # Walk-forward degradation chart
+    # ------------------------------------------------------------------
 
     def plot_walkforward_degradation(self) -> list:
         """

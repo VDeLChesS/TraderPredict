@@ -38,6 +38,7 @@ class MLStrategy(BaseStrategy):
         long_threshold: float = 0.55,
         exit_threshold: float = 0.50,
         use_hysteresis: bool = True,
+        multi_timeframe: bool = False,
     ):
         """
         Parameters
@@ -48,6 +49,9 @@ class MLStrategy(BaseStrategy):
                           Must be <= long_threshold.
         use_hysteresis  : If True, hold position between thresholds (reduces whipsaw).
                           If False, binary: signal = (proba >= long_threshold).
+        multi_timeframe : Set True if the underlying classifier was trained
+                          with multi-timeframe (weekly) features. Must match
+                          the training setup or feature columns will mismatch.
         """
         if exit_threshold > long_threshold:
             raise ValueError("exit_threshold must be <= long_threshold")
@@ -56,7 +60,11 @@ class MLStrategy(BaseStrategy):
         self.long_threshold  = long_threshold
         self.exit_threshold  = exit_threshold
         self.use_hysteresis  = use_hysteresis
-        self._fe             = FeatureEngineer(drop_warmup=False)
+        self.multi_timeframe = multi_timeframe
+        self._fe             = FeatureEngineer(
+            drop_warmup=False,
+            multi_timeframe=multi_timeframe,
+        )
 
     def generate_signals(self, df: pd.DataFrame) -> pd.Series:
         """
@@ -92,8 +100,22 @@ class MLStrategy(BaseStrategy):
 
     def _prepare_features(self, df: pd.DataFrame):
         """Build feature matrix from OHLCV df. Returns (X_filled, warmup_mask)."""
-        df_feat     = self._fe.build_features(df)
-        feat_cols   = self._fe.get_feature_names(df_feat)
+        df_feat = self._fe.build_features(df)
+
+        # Use the classifier's stored feature_names_ if available — guarantees
+        # exact column order and number match between training and inference.
+        if getattr(self.classifier, "feature_names_", None):
+            feat_cols = list(self.classifier.feature_names_)
+            missing = [c for c in feat_cols if c not in df_feat.columns]
+            if missing:
+                raise ValueError(
+                    f"MLStrategy: classifier expects features not produced by "
+                    f"the FeatureEngineer (multi_timeframe={self.multi_timeframe}). "
+                    f"Missing: {missing[:5]}{'...' if len(missing) > 5 else ''}"
+                )
+        else:
+            feat_cols = self._fe.get_feature_names(df_feat)
+
         X           = df_feat[feat_cols].reindex(df.index)
         warmup_mask = X.isna().any(axis=1)
         return X.fillna(0), warmup_mask

@@ -30,18 +30,22 @@ class FeatureEngineer:
     """Build a rich feature matrix from a clean OHLCV DataFrame."""
 
     # Feature group prefixes — used by get_feature_names() filtering
-    FEATURE_GROUPS = ["ret_", "vol_", "trend_", "bb_", "volume_", "regime_"]
+    FEATURE_GROUPS = ["ret_", "vol_", "trend_", "bb_", "volume_", "regime_", "mtf_"]
     TARGET_PREFIX  = "target_"
 
-    def __init__(self, drop_warmup: bool = True):
+    def __init__(self, drop_warmup: bool = True, multi_timeframe: bool = False):
         """
         Parameters
         ----------
         drop_warmup : bool
             If True, drop the first N rows where slow indicators are NaN.
             Recommended True for ML training; False to preserve full index.
+        multi_timeframe : bool
+            If True, also compute weekly-resampled features and broadcast
+            them back to the daily index. Adds the "mtf_" feature group.
         """
-        self.drop_warmup = drop_warmup
+        self.drop_warmup     = drop_warmup
+        self.multi_timeframe = multi_timeframe
 
     # ------------------------------------------------------------------
     # Public API
@@ -59,6 +63,9 @@ class FeatureEngineer:
         out = self._add_bollinger_features(out)
         out = self._add_volume_features(out)
         out = self._add_regime_features(out)
+
+        if self.multi_timeframe:
+            out = self._add_multi_timeframe_features(out)
 
         if self.drop_warmup:
             feature_cols = self.get_feature_names(out)
@@ -312,5 +319,66 @@ class FeatureEngineer:
         sma50 = df.get("trend_sma_50")
         if sma50 is not None:
             df["regime_trend_label"] = (df["close"] > sma50).astype(float)
+
+        return df
+
+    def _add_multi_timeframe_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Multi-timeframe (MTF) features: compute on weekly-resampled data,
+        then broadcast back to the daily index using forward-fill.
+
+        Pipeline:
+          daily close -> resample to weekly (Friday close)
+                      -> compute weekly indicators
+                      -> reindex to daily and forward-fill
+
+        ⚠️  No-lookahead: each weekly bar is "released" at its own date
+        (the Friday close), and forward-filled into the following week.
+        We then `shift(1)` so that today's bar uses LAST week's reading,
+        guaranteeing past-only data.
+        """
+        # Resample close to weekly (Friday close — week-ending convention)
+        weekly_close = df["close"].resample("W-FRI").last()
+
+        # Need at least a few weeks of data
+        if len(weekly_close) < 30:
+            return df
+
+        # --- Weekly returns ---
+        weekly_ret_1 = weekly_close.pct_change()
+        weekly_ret_4 = weekly_close / weekly_close.shift(4) - 1
+        weekly_ret_12 = weekly_close / weekly_close.shift(12) - 1
+
+        # --- Weekly trend: 10-week and 30-week SMAs ---
+        weekly_sma_10 = weekly_close.rolling(10).mean()
+        weekly_sma_30 = weekly_close.rolling(30).mean()
+        weekly_close_vs_sma10 = (weekly_close - weekly_sma_10) / weekly_sma_10
+        weekly_sma_ratio = weekly_sma_10 / weekly_sma_30.replace(0, np.nan) - 1
+
+        # --- Weekly RSI ---
+        weekly_rsi = ta.momentum.RSIIndicator(close=weekly_close, window=14).rsi()
+
+        # --- Weekly volatility (rolling std of weekly returns) ---
+        weekly_vol = weekly_ret_1.rolling(8).std() * np.sqrt(52)
+
+        # Combine into a weekly DataFrame
+        weekly_features = pd.DataFrame({
+            "mtf_w_ret_1w":         weekly_ret_1,
+            "mtf_w_ret_4w":         weekly_ret_4,
+            "mtf_w_ret_12w":        weekly_ret_12,
+            "mtf_w_close_vs_sma10": weekly_close_vs_sma10,
+            "mtf_w_sma_ratio":      weekly_sma_ratio,
+            "mtf_w_rsi":            weekly_rsi,
+            "mtf_w_vol":            weekly_vol,
+        })
+
+        # Broadcast to daily index: reindex with forward-fill
+        # Then shift by 1 day so today's bar uses LAST week's value
+        # (no lookahead — week-ending Friday becomes available Monday)
+        daily_mtf = weekly_features.reindex(df.index, method="ffill").shift(1)
+
+        # Add to df
+        for col in daily_mtf.columns:
+            df[col] = daily_mtf[col]
 
         return df

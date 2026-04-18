@@ -2,12 +2,21 @@
 train_models.py -- Reusable model training script.
 
 Trains XGBoost and LightGBM direction classifiers for all configured symbols.
-Each model is saved to models/saved/{sym_file}_{model_type}.pkl.
+Each model is saved to models/saved/{sym_file}_{model_type}{suffix}.pkl.
+
+File-naming suffixes:
+  ""        -> default daily target, no MTF, no tuning
+  "_5d"     -> 5-day direction target
+  "_mtf"    -> multi-timeframe features included
+  "_tuned"  -> Optuna-tuned hyperparameters
+  "_5d_mtf_tuned" -> all of the above
 
 Usage:
-    python scripts/train_models.py                  # Train all symbols
+    python scripts/train_models.py                            # Train all symbols (defaults)
     python scripts/train_models.py --symbols BTC-USD SPY
-    python scripts/train_models.py --target 5d       # Use 5-day direction target
+    python scripts/train_models.py --target 5d                # 5-day direction target
+    python scripts/train_models.py --multi-timeframe          # Add weekly features
+    python scripts/train_models.py --tune --n-trials 30       # Optuna hyperparameter tuning
 """
 
 import argparse
@@ -45,6 +54,9 @@ def train_and_save(
     processed_dir: Path = DATA_PROCESSED_DIR,
     train_pct: float = 0.80,
     suffix: str = "",
+    multi_timeframe: bool = False,
+    tune: bool = False,
+    n_trials: int = 30,
 ) -> dict:
     """
     Load OHLCV -> build features+targets -> train_test_evaluate -> save .pkl.
@@ -55,7 +67,10 @@ def train_and_save(
     model_type : "xgboost" or "lightgbm"
     target_col : target column name (default: target_direction_1d)
     model_dir  : directory to save .pkl files
-    suffix     : optional suffix for filename (e.g. "_5d")
+    suffix     : optional suffix for filename (e.g. "_5d", "_mtf", "_tuned")
+    multi_timeframe : include weekly-resampled features
+    tune       : run Optuna hyperparameter tuning before final training
+    n_trials   : Optuna trials when tune=True
 
     Returns
     -------
@@ -74,18 +89,36 @@ def train_and_save(
     print(f"  {symbol}: {len(df)} bars ({df.index[0].date()} to {df.index[-1].date()})")
 
     # Build features + targets
-    fe = FeatureEngineer(drop_warmup=True)
+    fe = FeatureEngineer(drop_warmup=True, multi_timeframe=multi_timeframe)
     df_all = fe.build_all(df)
     feat_cols = fe.get_feature_names(df_all)
 
     X = df_all[feat_cols]
     y = df_all[target_col]
 
-    print(f"  Features: {len(feat_cols)} columns, {len(X)} rows")
+    print(f"  Features: {len(feat_cols)} columns, {len(X)} rows  "
+          f"(MTF={'yes' if multi_timeframe else 'no'})")
     print(f"  Target: {target_col} (baseline={y.mean():.3f})")
 
-    # Train and evaluate
-    clf = DirectionClassifier(model_type=model_type)
+    # Optional: Optuna hyperparameter tuning
+    best_params = None
+    if tune:
+        from models.optuna_tuner import OptunaTuner
+        # Use only the training portion for tuning, to avoid OOS leakage
+        split = int(len(X) * train_pct)
+        X_tune = X.iloc[:split]
+        y_tune = y.iloc[:split]
+
+        print(f"  Tuning {model_type} with Optuna ({n_trials} trials)...")
+        tuner = OptunaTuner(model_type=model_type, n_trials=n_trials)
+        best_params, best_auc = tuner.tune(X_tune, y_tune)
+        print(f"  Best CV AUC: {best_auc:.4f}")
+        print(f"  Best params: {best_params}")
+        clf = tuner.build_best_classifier()
+    else:
+        clf = DirectionClassifier(model_type=model_type)
+
+    # Final train-test evaluation
     metrics = clf.train_test_evaluate(X, y, train_pct=train_pct)
 
     # Save model
@@ -126,17 +159,35 @@ def main():
                         help="Target horizon: 1d or 5d")
     parser.add_argument("--model-types", nargs="+", default=["xgboost", "lightgbm"],
                         help="Model types to train")
+    parser.add_argument("--multi-timeframe", action="store_true",
+                        help="Include weekly-resampled (MTF) features")
+    parser.add_argument("--tune", action="store_true",
+                        help="Run Optuna hyperparameter tuning before training")
+    parser.add_argument("--n-trials", type=int, default=30,
+                        help="Number of Optuna trials when --tune is set")
     args = parser.parse_args()
 
     symbols = args.symbols or SYMBOLS
     target_col = f"target_direction_{args.target}"
-    suffix = "" if args.target == "1d" else f"_{args.target}"
+
+    # Build filename suffix from flags
+    suffix_parts = []
+    if args.target != "1d":
+        suffix_parts.append(args.target)
+    if args.multi_timeframe:
+        suffix_parts.append("mtf")
+    if args.tune:
+        suffix_parts.append("tuned")
+    suffix = ("_" + "_".join(suffix_parts)) if suffix_parts else ""
 
     print("=" * 70)
     print("  TraderPredict -- Model Training")
     print(f"  Symbols: {symbols}")
     print(f"  Target:  {target_col}")
     print(f"  Models:  {args.model_types}")
+    print(f"  MTF features: {args.multi_timeframe}")
+    print(f"  Optuna tuning: {args.tune}" + (f" ({args.n_trials} trials)" if args.tune else ""))
+    print(f"  Suffix:  '{suffix}'")
     print("=" * 70)
 
     all_results = []
@@ -153,6 +204,9 @@ def main():
                     model_type=model_type,
                     target_col=target_col,
                     suffix=suffix,
+                    multi_timeframe=args.multi_timeframe,
+                    tune=args.tune,
+                    n_trials=args.n_trials,
                 )
                 all_results.append(result)
             except Exception as e:

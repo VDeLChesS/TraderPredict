@@ -71,10 +71,22 @@ def main():
     gen.save_csv()
     gen.save_walkforward_csv()
 
+    # Portfolio aggregation across symbols (Tier 2 Item 5)
+    if len(symbols) > 1:
+        portfolios = gen.build_portfolios(
+            strategy_names=["MA Crossover", "EMA 12/26", "MA 10/30"],
+            risk_config="no_risk",
+            methods=["equal_weight", "vol_weighted", "risk_parity"],
+        )
+        gen.print_portfolio_summary(portfolios)
+        gen.save_portfolio_csv(portfolios)
+
     print("\n  Generating plots...")
     gen.plot_equity_curves()
     gen.plot_risk_comparison()
     gen.plot_walkforward_degradation()
+    if len(symbols) > 1:
+        gen.plot_portfolio_equity(portfolios)
 
     print("\n" + "=" * 70)
     print("  Pipeline complete. Results in: results/")

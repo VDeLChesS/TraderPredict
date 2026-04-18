@@ -40,6 +40,7 @@ from strategies.ema_crossover import EMACrossoverStrategy
 from strategies.rsi_strategy import RSIStrategy
 from strategies.ml_strategy import MLStrategy
 from strategies.ensemble_strategy import EnsembleStrategy
+from strategies.regime_filter import RegimeFilteredStrategy
 from backtesting.engine import BacktestEngine
 from risk.risk_manager import RiskManager
 
@@ -102,6 +103,10 @@ class MultiStrategyPipeline:
         fees: float = 0.001,
         slippage: float = 0.0005,
         walkforward_train_pct: float = 0.70,
+        include_5d_ml: bool = True,
+        include_mtf_ml: bool = True,
+        include_tuned_ml: bool = True,
+        include_regime_filter: bool = True,
     ):
         self.symbols       = symbols
         self.model_dir     = Path(model_dir)
@@ -110,6 +115,10 @@ class MultiStrategyPipeline:
         self.engine        = BacktestEngine(init_cash=init_cash, fees=fees, slippage=slippage)
         self.fe            = FeatureEngineer(drop_warmup=False)
         self.walkforward_train_pct = walkforward_train_pct
+        self.include_5d_ml         = include_5d_ml
+        self.include_mtf_ml        = include_mtf_ml
+        self.include_tuned_ml      = include_tuned_ml
+        self.include_regime_filter = include_regime_filter
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -212,33 +221,51 @@ class MultiStrategyPipeline:
         sym_file = symbol.replace("-", "_")
         ml_strats = {}
 
+        # Variants we try to load: (suffix, label, multi_timeframe_flag)
+        ml_variants = [("",        "",       False)]
+        if self.include_5d_ml:
+            ml_variants.append(("_5d",       " 5D",    False))
+        if self.include_mtf_ml:
+            ml_variants.append(("_mtf",      " MTF",   True))
+        if self.include_tuned_ml:
+            ml_variants.append(("_tuned",    " Tuned", False))
+
         for model_type in ["xgboost", "lightgbm"]:
-            model_path = self.model_dir / f"{sym_file}_{model_type}.pkl"
-            if model_path.exists():
+            for suffix, label, mtf_flag in ml_variants:
+                model_path = self.model_dir / f"{sym_file}_{model_type}{suffix}.pkl"
+                if not model_path.exists():
+                    continue
                 try:
                     clf = DirectionClassifier.load(model_path)
 
-                    # Default threshold strategy (for ensembles)
+                    # Default threshold strategy
                     default_cfg = ML_THRESHOLD_GRID[0]
                     ml_strat = MLStrategy(
                         clf,
                         long_threshold=default_cfg["long_threshold"],
                         exit_threshold=default_cfg["exit_threshold"],
+                        multi_timeframe=mtf_flag,
                     )
-                    name = f"ML {model_type.upper()}"
-                    strategies[name] = ml_strat
-                    ml_strats[model_type] = ml_strat
+                    base_name = f"ML {model_type.upper()}{label}"
+                    strategies[base_name] = ml_strat
+
+                    # Track only the default-suffix model for ensembles (avoid bloat)
+                    if suffix == "":
+                        ml_strats[model_type] = ml_strat
+
                     print(f"  Loaded ML model: {model_path.name}")
 
-                    # Threshold variants (Item 2) -- skip the default (already added)
-                    for cfg in ML_THRESHOLD_GRID[1:]:
-                        variant_strat = MLStrategy(
-                            clf,
-                            long_threshold=cfg["long_threshold"],
-                            exit_threshold=cfg["exit_threshold"],
-                        )
-                        variant_name = f"ML {model_type.upper()}{cfg['label']}"
-                        strategies[variant_name] = variant_strat
+                    # Threshold variants (only for default-suffix models to limit blow-up)
+                    if suffix == "":
+                        for cfg in ML_THRESHOLD_GRID[1:]:
+                            variant_strat = MLStrategy(
+                                clf,
+                                long_threshold=cfg["long_threshold"],
+                                exit_threshold=cfg["exit_threshold"],
+                                multi_timeframe=mtf_flag,
+                            )
+                            variant_name = f"ML {model_type.upper()}{cfg['label']}"
+                            strategies[variant_name] = variant_strat
 
                 except Exception as e:
                     print(f"  [WARN] Failed to load {model_path.name}: {e}")
@@ -270,7 +297,26 @@ class MultiStrategyPipeline:
             )
             strategies["Ensemble (ML-gated)"] = ens_gated
 
-        print(f"  Strategies: {list(strategies.keys())}")
+        # --- Regime-filtered variants (Item 2) ---
+        # Wrap top rule-based strategies with a low-vol-only filter.
+        # Trade only when the 20d realised vol is below the 80th percentile
+        # of the trailing 252 bars — skip the wildest periods.
+        if self.include_regime_filter:
+            regime_targets = {
+                "MA Crossover (LowVol)": ma,
+                "EMA 12/26 (LowVol)":    strategies["EMA 12/26"],
+                "RSI (LowVol)":          rsi,
+            }
+            for name, base in regime_targets.items():
+                strategies[name] = RegimeFilteredStrategy(
+                    base_strategy=base,
+                    vol_window=20,
+                    percentile_window=252,
+                    mode="low_vol_only",
+                    upper_threshold=0.80,
+                )
+
+        print(f"  Strategies ({len(strategies)}): {list(strategies.keys())}")
         return strategies
 
     # ------------------------------------------------------------------
